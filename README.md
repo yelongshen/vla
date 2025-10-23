@@ -44,6 +44,22 @@ This repo includes a minimal AI2-THOR integration for a simple manipulation demo
 
 Notes: AI2-THOR may download scenes on first run. If running on a headless server, ensure you have a virtual framebuffer (Xvfb) or run in an environment that provides GPU/GL context.
 
+PyBullet stairs demo
+
+This repository includes a minimal PyBullet-based stairs stepping demo. It spawns a simple URDF robot and a staircase made of boxes and runs a short random-policy episode.
+
+1. Install dependencies (this will include pybullet):
+
+   python -m venv .venv
+   source .venv/bin/activate
+   pip install -r requirements.txt
+
+2. Run the PyBullet demo:
+
+   python examples/pybullet_demo.py
+
+Notes: The demo runs in DIRECT (headless) mode by default. To visualize, change `render=True` in `examples/pybullet_demo.py` or run the example on a machine with X/GL support.
+
 Contributing
 
 This scaffold is intended as a starting point — extend models, datasets and metrics as needed.

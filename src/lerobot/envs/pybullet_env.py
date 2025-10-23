@@ -39,7 +39,8 @@ class PyBulletStairsEnv:
         plane = p.loadURDF("plane.urdf")
 
         # build simple stairs using boxes
-        self.stairs_ids = []
+        self.time_step = time_step
+        self.robot_urdf = None  # Initialize robot_urdf parameter
         stair_height = 0.08
         stair_depth = 0.2
         num_steps = 6
@@ -54,7 +55,33 @@ class PyBulletStairsEnv:
         # load a simple robot URDF (use r2d2.urdf in pybullet_data as stand-in)
         start_pos = [0, 0, 0.5]
         start_orn = p.getQuaternionFromEuler([0, 0, 0])
-        robot_path = os.path.join(self._pbdata.getDataPath(), "r2d2.urdf")
+        # load a robot URDF. If user supplied a robot_urdf, try to resolve it; otherwise use builtin humanoid
+        robot_path = None
+        user_spec = getattr(self, 'robot_urdf', None)
+        if user_spec:
+            # resolve user-specified URDF: absolute path, relative path, or name under pybullet_data
+            if os.path.isabs(user_spec) and os.path.exists(user_spec):
+                robot_path = user_spec
+            elif os.path.exists(user_spec):
+                robot_path = user_spec
+            else:
+                candidate = user_spec
+                if not candidate.endswith('.urdf'):
+                    candidate = candidate + '.urdf'
+                candidate1 = os.path.join(self._pbdata.getDataPath(), candidate)
+                candidate2 = os.path.join(self._pbdata.getDataPath(), user_spec)
+                if os.path.exists(candidate1):
+                    robot_path = candidate1
+                elif os.path.exists(candidate2):
+                    robot_path = candidate2
+
+        if robot_path is None:
+            # default fallback to pybullet_data humanoid if available, else r2d2
+            humanoid_path = os.path.join(self._pbdata.getDataPath(), "humanoid/humanoid.urdf")
+            if os.path.exists(humanoid_path):
+                robot_path = humanoid_path
+            else:
+                robot_path = os.path.join(self._pbdata.getDataPath(), "r2d2.urdf")
         self.robot = p.loadURDF(robot_path, start_pos, start_orn)
 
         # collect controllable joints (robust to pybullet API differences)

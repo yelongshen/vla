@@ -1,0 +1,8 @@
+torch>=2.0.0
+torchvision>=0.15
+pyyaml>=6.0
+fastapi>=0.95
+uvicorn[standard]>=0.22
+numpy>=1.24
+pydantic>=1.10
+typing_extensions>=4.5

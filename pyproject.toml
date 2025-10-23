@@ -1,0 +1,14 @@
+[build-system]
+requires = ["setuptools", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lerobot"
+version = "0.0.1"
+description = "LeRobot platform for VLA model training, evaluation and deployment"
+authors = [ { name = "LeRobot" } ]
+readme = "README.md"
+requires-python = ">=3.9"
+
+[tool.setuptools.packages.find]
+where = ["src"]

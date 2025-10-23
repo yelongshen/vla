@@ -28,6 +28,22 @@ Project layout
 - configs/: example YAML configurations.
 - outputs/: default folder for checkpoints and logs.
 
+AI2-THOR demo
+
+This repo includes a minimal AI2-THOR integration for a simple manipulation demo.
+
+1. Install dependencies including AI2-THOR:
+
+   python -m venv .venv
+   source .venv/bin/activate
+   pip install -r requirements.txt
+
+2. Run the demo (this will start an AI2-THOR controller and run a small scripted episode):
+
+   python examples/ai2thor_demo.py
+
+Notes: AI2-THOR may download scenes on first run. If running on a headless server, ensure you have a virtual framebuffer (Xvfb) or run in an environment that provides GPU/GL context.
+
 Contributing
 
 This scaffold is intended as a starting point — extend models, datasets and metrics as needed.

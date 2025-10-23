@@ -25,4 +25,4 @@ def main(render=False):
 
 
 if __name__ == "__main__":
-    main(render=True)
+    main(render=False)

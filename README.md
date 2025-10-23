@@ -60,6 +60,14 @@ This repository includes a minimal PyBullet-based stairs stepping demo. It spawn
 
 Notes: The demo runs in DIRECT (headless) mode by default. To visualize, change `render=True` in `examples/pybullet_demo.py` or run the example on a machine with X/GL support.
 
+Reachy2 simulation
+
+If you have a Reachy2 URDF, you can run a simple Reachy demo. Provide the URDF path via the `REACHY_URDF` environment variable:
+
+   REACHY_URDF=/path/to/reachy.urdf python examples/reachy_demo.py
+
+The wrapper `src/lerobot/envs/reachy_env.py` exposes `reset()`, `step(action)` and `get_observation()`; actions are joint position targets for detected actuated joints.
+
 Contributing
 
 This scaffold is intended as a starting point — extend models, datasets and metrics as needed.

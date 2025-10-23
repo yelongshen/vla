@@ -5,6 +5,8 @@ Run: python examples/pybullet_demo.py
 import numpy as np
 from lerobot.envs.pybullet_env import PyBulletStairsEnv
 import time
+import os
+from PIL import Image
 
 
 def main(render=False):
@@ -35,12 +37,50 @@ def main(render=False):
             print(f"  joint {j}: name={name} type={info[2]} limits=({lower},{upper})")
     except Exception as e:
         print("Could not print joint info:", e)
-    for t in range(200):
+
+    # prepare output directory for saved frames
+    out_dir = os.path.join("outputs", "pybullet")
+    os.makedirs(out_dir, exist_ok=True)
+    total_steps = 200
+    save_count = 8
+    save_every = max(1, total_steps // save_count)
+    for t in range(total_steps):
         # random smooth actions
         a = np.tanh(np.random.randn(action_dim) * 0.5)
         obs, r, done, info = env.step(a)
         if t % 20 == 0:
             print(f"t={t} base_z={obs['base_pos'][2]:.3f} x={obs['base_pos'][0]:.3f}")
+
+        # capture and save frames at intervals
+        if t % save_every == 0:
+            try:
+                width = 320
+                height = 240
+                cam_target = obs.get("base_pos", [0.5, 0, 0.2])
+                cam_distance = 1.0
+                yaw, pitch, roll = 50, -30, 0
+                up_axis_index = 2
+                view = p.computeViewMatrixFromYawPitchRoll(camTargetPosition=cam_target,
+                                                           distance=cam_distance,
+                                                           yaw=yaw, pitch=pitch, roll=roll,
+                                                           upAxisIndex=up_axis_index)
+                proj = p.computeProjectionMatrixFOV(fov=60, aspect=float(width)/height, nearVal=0.01, farVal=10.0)
+                w, h, rgb, depth_buf, seg = p.getCameraImage(width, height, viewMatrix=view, projectionMatrix=proj, renderer=p.ER_TINY_RENDERER)
+                rgb_arr = np.reshape(rgb, (h, w, 4))[:, :, :3]
+                depth_arr = np.reshape(depth_buf, (h, w))
+                seg_arr = np.reshape(seg, (h, w))
+
+                idx = (t // save_every)
+                rgb_path = os.path.join(out_dir, f"frame_{idx:03d}_rgb.png")
+                depth_path = os.path.join(out_dir, f"frame_{idx:03d}_depth.npy")
+                seg_path = os.path.join(out_dir, f"frame_{idx:03d}_seg.npy")
+                Image.fromarray(rgb_arr).save(rgb_path)
+                np.save(depth_path, depth_arr)
+                np.save(seg_path, seg_arr)
+                print(f"Saved frame {idx} -> {rgb_path}")
+            except Exception as e:
+                print("Frame capture failed:", e)
+
         time.sleep(0.02)
 
     env.close()

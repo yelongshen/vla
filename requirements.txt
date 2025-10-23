@@ -8,3 +8,4 @@ pydantic>=1.10
 typing_extensions>=4.5
 ai2thor>=3.0
 pybullet
+Pillow>=9.0

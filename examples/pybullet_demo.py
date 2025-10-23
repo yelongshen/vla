@@ -10,7 +10,10 @@ from PIL import Image
 
 
 def main(render=False):
+    robot_spec = os.environ.get("PYBULLET_ROBOT")
     env = PyBulletStairsEnv(render=render)
+    if robot_spec:
+        env.robot_urdf = robot_spec
     obs = env.reset()
 
     # Print observation keys and contents summary

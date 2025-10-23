@@ -27,6 +27,8 @@ class PyBulletStairsEnv:
         p.setGravity(0, 0, -9.81)
         p.setTimeStep(time_step)
         self.time_step = time_step
+        # optional robot selector (name or path)
+        self.robot_urdf = None
         self.robot = None
         self.stairs_ids = []
         self.joint_ids = []
@@ -39,8 +41,6 @@ class PyBulletStairsEnv:
         plane = p.loadURDF("plane.urdf")
 
         # build simple stairs using boxes
-        self.time_step = time_step
-        self.robot_urdf = None  # Initialize robot_urdf parameter
         stair_height = 0.08
         stair_depth = 0.2
         num_steps = 6

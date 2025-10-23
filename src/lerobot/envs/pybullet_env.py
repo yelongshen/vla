@@ -57,12 +57,19 @@ class PyBulletStairsEnv:
         robot_path = os.path.join(self._pbdata.getDataPath(), "r2d2.urdf")
         self.robot = p.loadURDF(robot_path, start_pos, start_orn)
 
-        # collect controllable joints
+        # collect controllable joints (robust to pybullet API differences)
         self.joint_ids = []
+        allowed_joint_types = {getattr(p, 'JOINT_REVOLUTE', None), getattr(p, 'JOINT_PRISMATIC', None)}
+        jc = getattr(p, 'JOINT_CONTINUOUS', None)
+        if jc is not None:
+            allowed_joint_types.add(jc)
+        # remove any None values
+        allowed_joint_types = {t for t in allowed_joint_types if t is not None}
+
         for i in range(p.getNumJoints(self.robot)):
             info = p.getJointInfo(self.robot, i)
             joint_type = info[2]
-            if joint_type in (p.JOINT_REVOLUTE, p.JOINT_PRISMATIC, p.JOINT_CONTINUOUS):
+            if joint_type in allowed_joint_types:
                 self.joint_ids.append(i)
 
         return self.get_observation()

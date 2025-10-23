@@ -60,10 +60,8 @@ def main(render=False):
                 cam_distance = 1.0
                 yaw, pitch, roll = 50, -30, 0
                 up_axis_index = 2
-                view = p.computeViewMatrixFromYawPitchRoll(camTargetPosition=cam_target,
-                                                           distance=cam_distance,
-                                                           yaw=yaw, pitch=pitch, roll=roll,
-                                                           upAxisIndex=up_axis_index)
+                # use positional args for compatibility: (cameraTargetPosition, distance, yaw, pitch, roll, upAxisIndex)
+                view = p.computeViewMatrixFromYawPitchRoll(cam_target, cam_distance, yaw, pitch, roll, up_axis_index)
                 proj = p.computeProjectionMatrixFOV(fov=60, aspect=float(width)/height, nearVal=0.01, farVal=10.0)
                 w, h, rgb, depth_buf, seg = p.getCameraImage(width, height, viewMatrix=view, projectionMatrix=proj, renderer=p.ER_TINY_RENDERER)
                 rgb_arr = np.reshape(rgb, (h, w, 4))[:, :, :3]

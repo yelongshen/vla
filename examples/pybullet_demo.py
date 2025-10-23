@@ -64,7 +64,13 @@ def main(render=False):
                 view = p.computeViewMatrixFromYawPitchRoll(cam_target, cam_distance, yaw, pitch, roll, up_axis_index)
                 proj = p.computeProjectionMatrixFOV(fov=60, aspect=float(width)/height, nearVal=0.01, farVal=10.0)
                 w, h, rgb, depth_buf, seg = p.getCameraImage(width, height, viewMatrix=view, projectionMatrix=proj, renderer=p.ER_TINY_RENDERER)
-                rgb_arr = np.reshape(rgb, (h, w, 4))[:, :, :3]
+                # ensure rgb is uint8 and reshape according to returned w,h
+                rgb_np = np.asarray(rgb, dtype=np.uint8)
+                try:
+                    rgb_arr = rgb_np.reshape((h, w, 4))[:, :, :3]
+                except Exception:
+                    # fallback: try (w,h,4)
+                    rgb_arr = rgb_np.reshape((w, h, 4)).transpose(1, 0, 2)[:, :, :3]
                 depth_arr = np.reshape(depth_buf, (h, w))
                 seg_arr = np.reshape(seg, (h, w))
 

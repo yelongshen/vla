@@ -38,12 +38,37 @@ def configure_mujoco_gl(requested_backend: str, force_backend: bool) -> str:
     return backend
 
 
+def patch_mujoco_glcontext_del():
+    """Ensure MuJoCo's GLContext.__del__ tolerates partially initialized contexts."""
+    try:
+        import mujoco
+    except Exception:
+        return
+
+    original_del = getattr(mujoco.GLContext, "__del__", None)
+    if original_del is None or getattr(mujoco.GLContext, "__del__patched", False):
+        return
+
+    def safe_del(self, _original_del=original_del):
+        if not hasattr(self, "_context"):
+            return
+        try:
+            _original_del(self)
+        except AttributeError:
+            pass
+
+    mujoco.GLContext.__del__ = safe_del
+    mujoco.GLContext.__del__patched = True
+
+
 def probe_mujoco_backend(backend: str):
     """Attempt to create a tiny MuJoCo GL context to verify the backend works."""
     try:
         import mujoco
     except Exception as exc:
         return False, f"Unable to import mujoco to probe backend: {exc}"
+
+    patch_mujoco_glcontext_del()
 
     previous_backend = os.environ.get("MUJOCO_GL")
     if backend:
@@ -55,7 +80,11 @@ def probe_mujoco_backend(backend: str):
         ctx.free()
         return True, ""
     except Exception as exc:
-        return False, str(exc)
+        msg = str(exc)
+        if "Permission denied" in msg:
+            msg += "\nThe current user may not have access to /dev/dri render nodes. " \
+                   "Grant access or use --mujoco-gl osmesa."
+        return False, msg
     finally:
         if previous_backend is not None:
             os.environ["MUJOCO_GL"] = previous_backend
@@ -72,6 +101,7 @@ def main(
     force_mujoco_gl: bool = False,
 ):
     backend = configure_mujoco_gl(mujoco_gl, force_mujoco_gl)
+    patch_mujoco_glcontext_del()
     # lazy imports
     # Prefer gymnasium (actively maintained). Fall back to gym if gymnasium isn't present.
     gym = None

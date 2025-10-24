@@ -484,6 +484,13 @@ def main(
         if backend:
             os.environ["MUJOCO_GL"] = backend
 
+    if save_video and frames_written == 0 and last_render_error is not None:
+        raise RuntimeError(
+            "Unable to capture video frames because both EGL and OSMesa renderers failed.\n"
+            f"MuJoCo reported: {last_render_error}\n"
+            "Install headless rendering support (e.g. mesa-libOSMesa-dev / libosmesa6) or run with a working EGL GPU setup."
+        )
+
     if save_video and frames_written == 0 and force_mujoco_gl and last_render_error is not None:
         raise RuntimeError(
             "MuJoCo rendering failed even though --force-mujoco-gl was set.\n"

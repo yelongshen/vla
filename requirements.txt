@@ -9,3 +9,8 @@ typing_extensions>=4.5
 ai2thor>=3.0
 pybullet
 Pillow>=9.0
+gym>=0.26
+stable-baselines3[extra]>=2.0.0
+shimmy>=0.3.3
+gymnasium>=0.28
+imageio[ffmpeg]>=2.30

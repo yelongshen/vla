@@ -347,6 +347,7 @@ def main(
             else:
                 os.environ.pop("MUJOCO_GL", None)
 
+    print('evaluation backend', backend)
     rewards, frames_written = evaluate_policy_with_backend(backend)
 
     if save_video and frames_written == 0 and backend == "egl" and not force_mujoco_gl:

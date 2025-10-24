@@ -11,7 +11,7 @@ import argparse
 import numpy as np
 
 
-#os.environ["MUJOCO_GL"] = "osmesa"
+os.environ["MUJOCO_GL"] = "egl"
 #print("Forcing MUJOCO_GL=osmesa for MuJoCo rendering.")
 
 def main(total_timesteps: int = 10000, env_id: str = None, render: bool = False, save_video: str = None):

@@ -287,17 +287,9 @@ def main(
     print(f"Saved model to {model_path}")
 
     # evaluation
-    if (save_video or render) and backend == "egl" and not force_mujoco_gl:
-        ok, err_msg = probe_mujoco_backend("egl")
-        if not ok:
-            print(
-                "MuJoCo EGL probe failed before evaluation:"
-                f" {err_msg}\nSwitching to MUJOCO_GL=osmesa for rendering."
-            )
-            backend = "osmesa"
-            os.environ["MUJOCO_GL"] = backend
-            os.environ["PYOPENGL_PLATFORM"] = backend
-
+    backend = "osmesa"
+    os.environ["MUJOCO_GL"] = backend
+    #os.environ["PYOPENGL_PLATFORM"] = backend
 
     eval_episodes = 1
 
@@ -435,8 +427,8 @@ def main(
                             writer_local.append_data(frm)
                             frames_written_local += 1
 
-                    #if done:
-                    break
+                    if done:
+                        break
 
                 rewards_local.append(ep_rew)
                 print(f"Eval episode {ep+1} reward: {ep_rew:.2f}")
@@ -506,7 +498,7 @@ def main(
 
 if __name__ == '__main__':
     p = argparse.ArgumentParser()
-    p.add_argument('--timesteps', type=int, default=10000)
+    p.add_argument('--timesteps', type=int, default=100000)
     p.add_argument('--env', type=str, default=None)
     p.add_argument('--render', action='store_true')
     p.add_argument('--save-video', type=str, default=None,

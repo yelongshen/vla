@@ -188,154 +188,184 @@ def main(
 
     # evaluation
     eval_episodes = 1
-    rewards = []
-    eval_render_mode = None
-    eval_env = None
-    writer = None
-    frames_written = 0
-    capture_warning_shown = False
 
-    try:
-        if save_video:
-            try:
-                import imageio
-            except Exception:
-                raise RuntimeError("imageio is required to save videos. Install with `pip install imageio[ffmpeg]`")
-            writer = imageio.get_writer(save_video, fps=30)
-            eval_render_mode = 'rgb_array'
-        elif render:
-            eval_render_mode = 'human'
+    def evaluate_policy_with_backend(eval_backend: str):
+        nonlocal env
 
-        if eval_render_mode is not None:
-            try:
-                eval_env = gym.make(selected_env, render_mode=eval_render_mode)
-            except TypeError:
-                eval_env = gym.make(selected_env)
-            rollout_env = eval_env
-        else:
-            rollout_env = env
+        rewards_local = []
+        frames_written_local = 0
+        capture_warning_shown_local = False
+        eval_env_local = None
+        writer_local = None
+        eval_render_mode_local = None
+        prev_backend = os.environ.get("MUJOCO_GL")
 
-        for ep in range(eval_episodes):
-            reset_ret = rollout_env.reset()
-            if isinstance(reset_ret, tuple) and len(reset_ret) >= 1:
-                ob = reset_ret[0]
-            else:
-                ob = reset_ret
-            print("obs type:", type(ob), "shape:", getattr(np.asarray(ob), "shape", None), "dtype:", getattr(np.asarray(ob), "dtype", None))
-            done = False
-            ep_rew = 0.0
-            while True:
+        if eval_backend:
+            os.environ["MUJOCO_GL"] = eval_backend
+            print(f"Evaluating policy with MUJOCO_GL={eval_backend}")
+
+        try:
+            if save_video:
                 try:
-                    action, _ = model.predict(ob, deterministic=True)
+                    import imageio
                 except Exception:
-                    action, _ = model.predict(np.array([ob]), deterministic=True)
-                    if isinstance(action, (list, tuple, np.ndarray)) and getattr(action, 'shape', None) and action.shape[0] == 1:
-                        action = action[0]
+                    raise RuntimeError("imageio is required to save videos. Install with `pip install imageio[ffmpeg]`")
+                writer_local = imageio.get_writer(save_video, fps=30)
+                eval_render_mode_local = 'rgb_array'
+            elif render:
+                eval_render_mode_local = 'human'
 
-                step_ret = rollout_env.step(action)
-                if len(step_ret) == 4:
-                    ob, r, done, info = step_ret
-                elif len(step_ret) == 5:
-                    ob, r, terminated, truncated, info = step_ret
-                    done = bool(terminated or truncated)
+            if eval_render_mode_local is not None:
+                try:
+                    eval_env_local = gym.make(selected_env, render_mode=eval_render_mode_local)
+                except TypeError:
+                    eval_env_local = gym.make(selected_env)
+                rollout_env_local = eval_env_local
+            else:
+                rollout_env_local = env
+
+            for ep in range(eval_episodes):
+                reset_ret = rollout_env_local.reset()
+                if isinstance(reset_ret, tuple) and len(reset_ret) >= 1:
+                    ob = reset_ret[0]
                 else:
-                    raise RuntimeError(f"Unexpected env.step() return shape: {type(step_ret)} len={len(step_ret)}")
-
-                ep_rew += float(r)
-
-                if render:
+                    ob = reset_ret
+                print("obs type:", type(ob), "shape:", getattr(np.asarray(ob), "shape", None), "dtype:", getattr(np.asarray(ob), "dtype", None))
+                done = False
+                ep_rew = 0.0
+                while True:
                     try:
-                        rollout_env.render()
+                        action, _ = model.predict(ob, deterministic=True)
                     except Exception:
-                        pass
+                        action, _ = model.predict(np.array([ob]), deterministic=True)
+                        if isinstance(action, (list, tuple, np.ndarray)) and getattr(action, 'shape', None) and action.shape[0] == 1:
+                            action = action[0]
 
-                if save_video and writer is not None:
-                    frame = None
-                    render_error = None
-                    try:
-                        frame = rollout_env.render()
-                    except TypeError as exc:
-                        render_error = exc
-                        # Some environments disallow positional args / modes when render_mode already set.
+                    step_ret = rollout_env_local.step(action)
+                    if len(step_ret) == 4:
+                        ob, r, done, info = step_ret
+                    elif len(step_ret) == 5:
+                        ob, r, terminated, truncated, info = step_ret
+                        done = bool(terminated or truncated)
+                    else:
+                        raise RuntimeError(f"Unexpected env.step() return shape: {type(step_ret)} len={len(step_ret)}")
+
+                    ep_rew += float(r)
+
+                    if render:
+                        try:
+                            rollout_env_local.render()
+                        except Exception:
+                            pass
+
+                    if save_video and writer_local is not None:
                         frame = None
-                    except Exception as exc:
-                        render_error = exc
-                        frame = None
+                        render_error = None
+                        try:
+                            frame = rollout_env_local.render()
+                        except TypeError as exc:
+                            render_error = exc
+                            # Some environments disallow positional args / modes when render_mode already set.
+                            frame = None
+                        except Exception as exc:
+                            render_error = exc
+                            frame = None
 
-                    if frame is None:
-                        # Try MuJoCo's low-level renderer, available on mujoco environments.
-                        renderer = getattr(rollout_env, "mujoco_renderer", None)
-                        if renderer is None and hasattr(rollout_env, "unwrapped"):
-                            renderer = getattr(rollout_env.unwrapped, "mujoco_renderer", None)
+                        if frame is None:
+                            # Try MuJoCo's low-level renderer, available on mujoco environments.
+                            renderer = getattr(rollout_env_local, "mujoco_renderer", None)
+                            if renderer is None and hasattr(rollout_env_local, "unwrapped"):
+                                renderer = getattr(rollout_env_local.unwrapped, "mujoco_renderer", None)
 
-                        if renderer is None and hasattr(rollout_env, "unwrapped"):
-                            renderer = getattr(rollout_env.unwrapped, "renderer", None) or renderer
+                            if renderer is None and hasattr(rollout_env_local, "unwrapped"):
+                                renderer = getattr(rollout_env_local.unwrapped, "renderer", None) or renderer
 
-                        if renderer is not None:
-                            try:
-                                frame = renderer.render('rgb_array')
-                            except TypeError:
-                                render_error = render_error or TypeError("renderer.render('rgb_array') unsupported")
+                            if renderer is not None:
                                 try:
-                                    frame = renderer.render()
+                                    frame = renderer.render('rgb_array')
+                                except TypeError:
+                                    render_error = render_error or TypeError("renderer.render('rgb_array') unsupported")
+                                    try:
+                                        frame = renderer.render()
+                                    except Exception as inner_exc:
+                                        render_error = inner_exc
+                                        frame = None
                                 except Exception as inner_exc:
                                     render_error = inner_exc
                                     frame = None
-                            except Exception as inner_exc:
-                                render_error = inner_exc
-                                frame = None
 
-                    if frame is None:
-                        if not capture_warning_shown:
-                            msg = "Warning: env.render() returned None; unable to capture video frame."
-                            if render_error is not None:
-                                msg += f" Last error: {render_error}"
-                            msg += f" Active MUJOCO_GL={os.environ.get('MUJOCO_GL')}"
-                            msg += ". Ensure the backend is installed (see MUJOCO_LOG.TXT for details)."
-                            print(msg)
-                            capture_warning_shown = True
-                    else:
-                        frm = np.asarray(frame)
-                        if frm.dtype != np.uint8:
-                            frm = np.clip(frm, 0, 255)
-                            if frm.max() <= 1.0:
-                                frm = (frm * 255).astype(np.uint8)
-                            else:
-                                frm = frm.astype(np.uint8)
-                        writer.append_data(frm)
-                        frames_written += 1
+                        if frame is None:
+                            if not capture_warning_shown_local:
+                                msg = "Warning: env.render() returned None; unable to capture video frame."
+                                if render_error is not None:
+                                    msg += f" Last error: {render_error}"
+                                msg += f" Active MUJOCO_GL={os.environ.get('MUJOCO_GL')}"
+                                msg += ". Ensure the backend is installed (see MUJOCO_LOG.TXT for details)."
+                                print(msg)
+                                capture_warning_shown_local = True
+                        else:
+                            frm = np.asarray(frame)
+                            if frm.dtype != np.uint8:
+                                frm = np.clip(frm, 0, 255)
+                                if frm.max() <= 1.0:
+                                    frm = (frm * 255).astype(np.uint8)
+                                else:
+                                    frm = frm.astype(np.uint8)
+                            writer_local.append_data(frm)
+                            frames_written_local += 1
 
-                if done:
-                    break
+                    if done:
+                        break
 
-            rewards.append(ep_rew)
-            print(f"Eval episode {ep+1} reward: {ep_rew:.2f}")
+                rewards_local.append(ep_rew)
+                print(f"Eval episode {ep+1} reward: {ep_rew:.2f}")
 
-        print(f"Mean eval reward: {np.mean(rewards):.2f} (std {np.std(rewards):.2f})")
+            if rewards_local:
+                print(f"Mean eval reward: {np.mean(rewards_local):.2f} (std {np.std(rewards_local):.2f})")
 
-    finally:
-        if writer is not None:
-            writer.close()
-            if frames_written > 0:
-                print(f"Saved rollout video to {save_video}")
+            return rewards_local, frames_written_local
+
+        finally:
+            if writer_local is not None:
+                writer_local.close()
+                if frames_written_local > 0:
+                    print(f"Saved rollout video to {save_video}")
+                else:
+                    print(
+                        "Warning: no video frames were captured with MUJOCO_GL="
+                        f"{eval_backend}. Inspect MUJOCO_LOG.TXT and ensure the backend is available."
+                    )
+
+            if eval_env_local is not None:
+                try:
+                    eval_env_local.close()
+                except Exception:
+                    pass
+
+            if prev_backend is not None:
+                os.environ["MUJOCO_GL"] = prev_backend
             else:
-                active_backend = os.environ.get("MUJOCO_GL")
-                print(
-                    "Warning: no video frames were captured with MUJOCO_GL="
-                    f"{active_backend}. Inspect MUJOCO_LOG.TXT and ensure the backend is available."
-                )
+                os.environ.pop("MUJOCO_GL", None)
 
-        # Close evaluation and training envs
+    rewards, frames_written = evaluate_policy_with_backend(backend)
+
+    if save_video and frames_written == 0 and backend == "egl" and not force_mujoco_gl:
+        print("Retrying evaluation rollout with MUJOCO_GL=osmesa after EGL failure.")
         try:
-            if eval_env is not None:
-                eval_env.close()
-        except Exception:
+            if os.path.exists(save_video):
+                os.remove(save_video)
+        except OSError:
             pass
-        try:
-            if eval_env is None or eval_env is not env:
-                env.close()
-        except Exception:
-            pass
+        backend = "osmesa"
+        rewards, frames_written = evaluate_policy_with_backend("osmesa")
+        if backend:
+            os.environ["MUJOCO_GL"] = backend
+
+    # Close evaluation and training envs
+    try:
+        env.close()
+    except Exception:
+        pass
 
 
 if __name__ == '__main__':

@@ -11,6 +11,9 @@ import argparse
 import numpy as np
 
 
+#os.environ["MUJOCO_GL"] = "osmesa"
+#print("Forcing MUJOCO_GL=osmesa for MuJoCo rendering.")
+
 def main(total_timesteps: int = 10000, env_id: str = None, render: bool = False, save_video: str = None):
     # lazy imports
     # Prefer gymnasium (actively maintained). Fall back to gym if gymnasium isn't present.
@@ -35,21 +38,33 @@ def main(total_timesteps: int = 10000, env_id: str = None, render: bool = False,
     # try to select a MuJoCo env
     env = None
     selected_env = env_id
+    mujo_env_candidates = [
+        "HalfCheetah-v5",
+        "HalfCheetah-v4",
+        "Walker2d-v5",
+        "Walker2d-v4",
+        "Ant-v5",
+        "Ant-v4",
+        "Humanoid-v5",
+        "Humanoid-v4",
+    ]
+
     if env_id is None:
-        mujo_env_candidates = ["HalfCheetah-v4", "HalfCheetah-v2", "Ant-v4", "Ant-v2", "Humanoid-v4", "Humanoid-v2"]
         for cand in mujo_env_candidates:
             try:
                 env = gym.make(cand)
                 selected_env = cand
                 print(f"Using MuJoCo environment: {cand}")
                 break
-            except Exception:
+            except Exception as exc:
+                print(f"Failed to create environment '{cand}': {exc}")
                 env = None
     else:
         try:
             env = gym.make(env_id)
             selected_env = env_id
-        except Exception:
+        except Exception as exc:
+            print(f"Failed to create environment '{env_id}': {exc}")
             env = None
 
     if env is None:
@@ -123,106 +138,150 @@ def main(total_timesteps: int = 10000, env_id: str = None, render: bool = False,
     print(f"Saved model to {model_path}")
 
     # evaluation
-    eval_episodes = 5
+    eval_episodes = 1
     rewards = []
-    video_writer = None
-    frames = []
-    if save_video:
-        try:
-            import imageio
-        except Exception:
-            raise RuntimeError("imageio is required to save videos. Install with `pip install imageio[ffmpeg]`")
-        try:
-            eval_env = gym.make(selected_env, render_mode='rgb_array')
-        except Exception:
-            eval_env = gym.make(selected_env)
-        env = eval_env
+    eval_render_mode = None
+    eval_env = None
+    writer = None
+    frames_written = 0
+    capture_warning_shown = False
 
-        
-    for ep in range(eval_episodes):
-        # gym vs gymnasium reset differences: gymnasium returns (obs, info)
-        reset_ret = env.reset()
-        if isinstance(reset_ret, tuple) and len(reset_ret) >= 1:
-            ob = reset_ret[0]
-        else:
-            ob = reset_ret
-        print("obs type:", type(ob), "shape:", getattr(np.asarray(ob), "shape", None), "dtype:", getattr(np.asarray(ob), "dtype", None))
-        done = False
-        ep_rew = 0.0
-        while True:
-            # model.predict may accept a batch or a single observation depending on the policy; handle both
+    try:
+        if save_video:
             try:
-                action, _ = model.predict(ob, deterministic=True)
+                import imageio
             except Exception:
-                # some gym wrappers expect flattened observations or different types; try wrapping in list
-                action, _ = model.predict(np.array([ob]), deterministic=True)
-                # unwrap action
-                if isinstance(action, (list, tuple, np.ndarray)) and getattr(action, 'shape', None) and action.shape[0] == 1:
-                    action = action[0]
+                raise RuntimeError("imageio is required to save videos. Install with `pip install imageio[ffmpeg]`")
+            writer = imageio.get_writer(save_video, fps=30)
+            eval_render_mode = 'rgb_array'
+        elif render:
+            eval_render_mode = 'human'
 
-            step_ret = env.step(action)
-            # gym returns (obs, reward, done, info)
-            # gymnasium returns (obs, reward, terminated, truncated, info)
-            if len(step_ret) == 4:
-                ob, r, done, info = step_ret
-            elif len(step_ret) == 5:
-                ob, r, terminated, truncated, info = step_ret
-                done = bool(terminated or truncated)
+        if eval_render_mode is not None:
+            try:
+                eval_env = gym.make(selected_env, render_mode=eval_render_mode)
+            except TypeError:
+                eval_env = gym.make(selected_env)
+            rollout_env = eval_env
+        else:
+            rollout_env = env
+
+        for ep in range(eval_episodes):
+            reset_ret = rollout_env.reset()
+            if isinstance(reset_ret, tuple) and len(reset_ret) >= 1:
+                ob = reset_ret[0]
             else:
-                # unexpected format
-                raise RuntimeError(f"Unexpected env.step() return shape: {type(step_ret)} len={len(step_ret)}")
-
-            ep_rew += float(r)
-            if render:
-                # some envs from gymnasium need render(mode='human') or env.render() depending on backend
+                ob = reset_ret
+            print("obs type:", type(ob), "shape:", getattr(np.asarray(ob), "shape", None), "dtype:", getattr(np.asarray(ob), "dtype", None))
+            done = False
+            ep_rew = 0.0
+            while True:
                 try:
-                    env.render()
+                    action, _ = model.predict(ob, deterministic=True)
                 except Exception:
+                    action, _ = model.predict(np.array([ob]), deterministic=True)
+                    if isinstance(action, (list, tuple, np.ndarray)) and getattr(action, 'shape', None) and action.shape[0] == 1:
+                        action = action[0]
+
+                step_ret = rollout_env.step(action)
+                if len(step_ret) == 4:
+                    ob, r, done, info = step_ret
+                elif len(step_ret) == 5:
+                    ob, r, terminated, truncated, info = step_ret
+                    done = bool(terminated or truncated)
+                else:
+                    raise RuntimeError(f"Unexpected env.step() return shape: {type(step_ret)} len={len(step_ret)}")
+
+                ep_rew += float(r)
+
+                if render:
                     try:
-                        env.render(mode='human')
+                        rollout_env.render()
                     except Exception:
                         pass
 
-            if save_video:
-                try:
-                    # gymnasium with render_mode='rgb_array' returns frames from render()
+                if save_video and writer is not None:
                     frame = None
+                    render_error = None
                     try:
-                        frame = eval_env.render()
-                    except Exception:
-                        try:
-                            frame = eval_env.render(mode='rgb_array')
-                        except Exception:
-                            frame = None
-                    if frame is not None:
-                        # ensure uint8 HWC
+                        frame = rollout_env.render()
+                    except TypeError as exc:
+                        render_error = exc
+                        # Some environments disallow positional args / modes when render_mode already set.
+                        frame = None
+                    except Exception as exc:
+                        render_error = exc
+                        frame = None
+
+                    if frame is None:
+                        # Try MuJoCo's low-level renderer, available on mujoco environments.
+                        renderer = getattr(rollout_env, "mujoco_renderer", None)
+                        if renderer is None and hasattr(rollout_env, "unwrapped"):
+                            renderer = getattr(rollout_env.unwrapped, "mujoco_renderer", None)
+
+                        if renderer is None and hasattr(rollout_env, "unwrapped"):
+                            renderer = getattr(rollout_env.unwrapped, "renderer", None) or renderer
+
+                        if renderer is not None:
+                            try:
+                                frame = renderer.render('rgb_array')
+                            except TypeError:
+                                render_error = render_error or TypeError("renderer.render('rgb_array') unsupported")
+                                try:
+                                    frame = renderer.render()
+                                except Exception:
+                                    render_error = exc
+                                    frame = None
+                            except Exception as exc:
+                                render_error = exc
+                                frame = None
+
+                    if frame is None:
+                        if not capture_warning_shown:
+                            msg = "Warning: env.render() returned None; unable to capture video frame."
+                            if render_error is not None:
+                                msg += f" Last error: {render_error}"
+                            msg += " Ensure MuJoCo is configured with an offscreen renderer (e.g. MUJOCO_GL=egl)."
+                            print(msg)
+                            capture_warning_shown = True
+                    else:
                         frm = np.asarray(frame)
                         if frm.dtype != np.uint8:
-                            # scale/clip floats to uint8 if needed
-                            frm = (255 * np.clip(frm, 0, 1)).astype(np.uint8)
-                        frames.append(frm)
-                except Exception:
-                    # non-fatal: continue without saving this frame
-                    pass
+                            frm = np.clip(frm, 0, 255)
+                            if frm.max() <= 1.0:
+                                frm = (frm * 255).astype(np.uint8)
+                            else:
+                                frm = frm.astype(np.uint8)
+                        writer.append_data(frm)
+                        frames_written += 1
 
-            if done:
-                break
+                if done:
+                    break
 
-        rewards.append(ep_rew)
-        print(f"Eval episode {ep+1} reward: {ep_rew:.2f}")
+            rewards.append(ep_rew)
+            print(f"Eval episode {ep+1} reward: {ep_rew:.2f}")
 
-    print(f"Mean eval reward: {np.mean(rewards):.2f} (std {np.std(rewards):.2f})")
-    env.close()
-    # write video if requested
-    if save_video and frames:
+        print(f"Mean eval reward: {np.mean(rewards):.2f} (std {np.std(rewards):.2f})")
+
+    finally:
+        if writer is not None:
+            writer.close()
+            if frames_written > 0:
+                print(f"Saved rollout video to {save_video}")
+            else:
+                print("Warning: no video frames were captured; verify MuJoCo offscreen rendering (MUJOCO_GL=egl).")
+
+        # Close evaluation and training envs
         try:
-            import imageio
-            imageio.get_writer(save_video, fps=30).append_data(frames[0])
-            # append all frames (imageio writer can be used in a context manager, but for simplicity use mimsave)
-            imageio.mimsave(save_video, frames, fps=30)
-            print(f"Saved rollout video to {save_video}")
-        except Exception as e:
-            print("Failed to write video:", e)
+            if eval_env is not None:
+                eval_env.close()
+        except Exception:
+            pass
+        try:
+            if eval_env is None or eval_env is not env:
+                env.close()
+        except Exception:
+            pass
 
 
 if __name__ == '__main__':

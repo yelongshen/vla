@@ -38,6 +38,31 @@ def configure_mujoco_gl(requested_backend: str, force_backend: bool) -> str:
     return backend
 
 
+def probe_mujoco_backend(backend: str):
+    """Attempt to create a tiny MuJoCo GL context to verify the backend works."""
+    try:
+        import mujoco
+    except Exception as exc:
+        return False, f"Unable to import mujoco to probe backend: {exc}"
+
+    previous_backend = os.environ.get("MUJOCO_GL")
+    if backend:
+        os.environ["MUJOCO_GL"] = backend
+
+    try:
+        ctx = mujoco.GLContext(1, 1)
+        ctx.make_current()
+        ctx.free()
+        return True, ""
+    except Exception as exc:
+        return False, str(exc)
+    finally:
+        if previous_backend is not None:
+            os.environ["MUJOCO_GL"] = previous_backend
+        else:
+            os.environ.pop("MUJOCO_GL", None)
+
+
 def main(
     total_timesteps: int = 10000,
     env_id: str = None,
@@ -187,6 +212,16 @@ def main(
     print(f"Saved model to {model_path}")
 
     # evaluation
+    if (save_video or render) and backend == "egl" and not force_mujoco_gl:
+        ok, err_msg = probe_mujoco_backend("egl")
+        if not ok:
+            print(
+                "MuJoCo EGL probe failed before evaluation:"
+                f" {err_msg}\nSwitching to MUJOCO_GL=osmesa for rendering."
+            )
+            backend = "osmesa"
+            os.environ["MUJOCO_GL"] = backend
+
     eval_episodes = 1
 
     def evaluate_policy_with_backend(eval_backend: str):
@@ -195,6 +230,7 @@ def main(
         rewards_local = []
         frames_written_local = 0
         capture_warning_shown_local = False
+        last_render_error_local = None
         eval_env_local = None
         writer_local = None
         eval_render_mode_local = None
@@ -220,6 +256,13 @@ def main(
                     eval_env_local = gym.make(selected_env, render_mode=eval_render_mode_local)
                 except TypeError:
                     eval_env_local = gym.make(selected_env)
+                except Exception as exc:
+                    last_render_error_local = exc
+                    print(
+                        "Failed to create evaluation environment with MUJOCO_GL="
+                        f"{os.environ.get('MUJOCO_GL')}: {exc}"
+                    )
+                    return [], 0, last_render_error_local
                 rollout_env_local = eval_env_local
             else:
                 rollout_env_local = env
@@ -299,6 +342,7 @@ def main(
                                 msg = "Warning: env.render() returned None; unable to capture video frame."
                                 if render_error is not None:
                                     msg += f" Last error: {render_error}"
+                                    last_render_error_local = render_error
                                 msg += f" Active MUJOCO_GL={os.environ.get('MUJOCO_GL')}"
                                 msg += ". Ensure the backend is installed (see MUJOCO_LOG.TXT for details)."
                                 print(msg)
@@ -314,8 +358,8 @@ def main(
                             writer_local.append_data(frm)
                             frames_written_local += 1
 
-                    if done:
-                        break
+                    #if done:
+                    break
 
                 rewards_local.append(ep_rew)
                 print(f"Eval episode {ep+1} reward: {ep_rew:.2f}")
@@ -323,7 +367,7 @@ def main(
             if rewards_local:
                 print(f"Mean eval reward: {np.mean(rewards_local):.2f} (std {np.std(rewards_local):.2f})")
 
-            return rewards_local, frames_written_local
+            return rewards_local, frames_written_local, last_render_error_local
 
         finally:
             if writer_local is not None:
@@ -348,7 +392,7 @@ def main(
                 os.environ.pop("MUJOCO_GL", None)
 
     print('evaluation backend', backend)
-    rewards, frames_written = evaluate_policy_with_backend(backend)
+    rewards, frames_written, last_render_error = evaluate_policy_with_backend(backend)
 
     if save_video and frames_written == 0 and backend == "egl" and not force_mujoco_gl:
         print("Retrying evaluation rollout with MUJOCO_GL=osmesa after EGL failure.")
@@ -358,9 +402,16 @@ def main(
         except OSError:
             pass
         backend = "osmesa"
-        rewards, frames_written = evaluate_policy_with_backend("osmesa")
+        rewards, frames_written, last_render_error = evaluate_policy_with_backend("osmesa")
         if backend:
             os.environ["MUJOCO_GL"] = backend
+
+    if save_video and frames_written == 0 and force_mujoco_gl and last_render_error is not None:
+        raise RuntimeError(
+            "MuJoCo rendering failed even though --force-mujoco-gl was set.\n"
+            f"Last error: {last_render_error}\n"
+            "Inspect MUJOCO_LOG.TXT for backend diagnostics."
+        )
 
     # Close evaluation and training envs
     try:

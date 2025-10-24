@@ -61,6 +61,51 @@ def patch_mujoco_glcontext_del():
     mujoco.GLContext.__del__patched = True
 
 
+def patch_offscreen_viewer_cleanup():
+    """Guard OffScreenViewer.free/__del__ against partially initialized contexts."""
+    module = None
+    try:
+        import gymnasium.envs.mujoco.mujoco_rendering as module  # type: ignore
+    except Exception:
+        try:
+            import gym.envs.mujoco.mujoco_rendering as module  # type: ignore
+        except Exception:
+            return
+
+    OffScreenViewer = getattr(module, "OffScreenViewer", None)
+    if OffScreenViewer is None:
+        return
+
+    if getattr(OffScreenViewer, "__cleanup_patched", False):
+        return
+
+    original_free = getattr(OffScreenViewer, "free", None)
+    if original_free is not None:
+        def safe_free(self, _original_free=original_free):
+            if not hasattr(self, "opengl_context") or self.opengl_context is None:
+                return
+            try:
+                _original_free(self)
+            except AttributeError:
+                pass
+
+        OffScreenViewer.free = safe_free
+
+    original_del = getattr(OffScreenViewer, "__del__", None)
+    if original_del is not None:
+        def safe_del(self, _original_del=original_del):
+            if not hasattr(self, "opengl_context") or self.opengl_context is None:
+                return
+            try:
+                _original_del(self)
+            except AttributeError:
+                pass
+
+        OffScreenViewer.__del__ = safe_del
+
+    OffScreenViewer.__cleanup_patched = True
+
+
 def probe_mujoco_backend(backend: str):
     """Attempt to create a tiny MuJoCo GL context to verify the backend works."""
     try:
@@ -102,6 +147,7 @@ def main(
 ):
     backend = configure_mujoco_gl(mujoco_gl, force_mujoco_gl)
     patch_mujoco_glcontext_del()
+    patch_offscreen_viewer_cleanup()
     # lazy imports
     # Prefer gymnasium (actively maintained). Fall back to gym if gymnasium isn't present.
     gym = None
@@ -251,6 +297,8 @@ def main(
             )
             backend = "osmesa"
             os.environ["MUJOCO_GL"] = backend
+            os.environ["PYOPENGL_PLATFORM"] = backend
+
 
     eval_episodes = 1
 

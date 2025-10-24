@@ -11,10 +11,42 @@ import argparse
 import numpy as np
 
 
-os.environ["MUJOCO_GL"] = "egl"
-#print("Forcing MUJOCO_GL=osmesa for MuJoCo rendering.")
+def configure_mujoco_gl(requested_backend: str, force_backend: bool) -> str:
+    """Configure MuJoCo's OpenGL backend before environments are created."""
+    original_backend = os.environ.get("MUJOCO_GL")
+    backend = requested_backend
 
-def main(total_timesteps: int = 10000, env_id: str = None, render: bool = False, save_video: str = None):
+    if requested_backend == "auto":
+        if original_backend:
+            backend = original_backend
+        elif os.environ.get("DISPLAY") is None:
+            backend = "egl"
+        else:
+            backend = "glfw"
+
+    if backend:
+        os.environ["MUJOCO_GL"] = backend
+
+    if backend == "egl" and os.environ.get("MUJOCO_EGL_DEVICE_ID") is None:
+        os.environ["MUJOCO_EGL_DEVICE_ID"] = os.environ.get("EGL_DEVICE_ID", "0")
+
+    if original_backend and backend != original_backend:
+        print(f"Overriding existing MUJOCO_GL={original_backend} with {backend} (force={force_backend}).")
+    else:
+        print(f"Configured MUJOCO_GL={backend} (force={force_backend}).")
+
+    return backend
+
+
+def main(
+    total_timesteps: int = 10000,
+    env_id: str = None,
+    render: bool = False,
+    save_video: str = None,
+    mujoco_gl: str = "auto",
+    force_mujoco_gl: bool = False,
+):
+    backend = configure_mujoco_gl(mujoco_gl, force_mujoco_gl)
     # lazy imports
     # Prefer gymnasium (actively maintained). Fall back to gym if gymnasium isn't present.
     gym = None
@@ -36,8 +68,6 @@ def main(total_timesteps: int = 10000, env_id: str = None, render: bool = False,
             ) from e
 
     # try to select a MuJoCo env
-    env = None
-    selected_env = env_id
     mujo_env_candidates = [
         "HalfCheetah-v5",
         "HalfCheetah-v4",
@@ -49,25 +79,44 @@ def main(total_timesteps: int = 10000, env_id: str = None, render: bool = False,
         "Humanoid-v4",
     ]
 
-    if env_id is None:
-        for cand in mujo_env_candidates:
+    def select_mujoco_env(candidate_env_id: str):
+        env_obj = None
+        chosen_env = candidate_env_id
+        if candidate_env_id is None:
+            for cand in mujo_env_candidates:
+                try:
+                    env_obj = gym.make(cand)
+                    chosen_env = cand
+                    print(f"Using MuJoCo environment: {cand}")
+                    break
+                except Exception as exc:
+                    print(f"Failed to create environment '{cand}': {exc}")
+                    env_obj = None
+        else:
             try:
-                env = gym.make(cand)
-                selected_env = cand
-                print(f"Using MuJoCo environment: {cand}")
-                break
+                env_obj = gym.make(candidate_env_id)
+                chosen_env = candidate_env_id
             except Exception as exc:
-                print(f"Failed to create environment '{cand}': {exc}")
-                env = None
-    else:
-        try:
-            env = gym.make(env_id)
-            selected_env = env_id
-        except Exception as exc:
-            print(f"Failed to create environment '{env_id}': {exc}")
-            env = None
+                print(f"Failed to create environment '{candidate_env_id}': {exc}")
+                env_obj = None
+
+        return env_obj, chosen_env
+
+    env, selected_env = select_mujoco_env(env_id)
+
+    if env is None and backend == "egl" and not force_mujoco_gl:
+        print("MuJoCo env creation failed with MUJOCO_GL=egl; retrying with MUJOCO_GL=osmesa for software rendering.")
+        os.environ["MUJOCO_GL"] = "osmesa"
+        backend = "osmesa"
+        env, selected_env = select_mujoco_env(env_id)
+        print("Pass --force-mujoco-gl to keep MUJOCO_GL=egl even if environment creation fails.")
 
     if env is None:
+        if force_mujoco_gl:
+            raise RuntimeError(
+                f"Failed to create MuJoCo environment with forced MUJOCO_GL={os.environ.get('MUJOCO_GL')}\n"
+                "Check your EGL/GLFW installation (see MUJOCO_LOG.TXT) or rerun without --force-mujoco-gl."
+            )
         print("MuJoCo environments not available. Falling back to CartPole-v1 for demo.")
         selected_env = "CartPole-v1"
         env = gym.make(selected_env)
@@ -229,11 +278,11 @@ def main(total_timesteps: int = 10000, env_id: str = None, render: bool = False,
                                 render_error = render_error or TypeError("renderer.render('rgb_array') unsupported")
                                 try:
                                     frame = renderer.render()
-                                except Exception:
-                                    render_error = exc
+                                except Exception as inner_exc:
+                                    render_error = inner_exc
                                     frame = None
-                            except Exception as exc:
-                                render_error = exc
+                            except Exception as inner_exc:
+                                render_error = inner_exc
                                 frame = None
 
                     if frame is None:
@@ -241,7 +290,8 @@ def main(total_timesteps: int = 10000, env_id: str = None, render: bool = False,
                             msg = "Warning: env.render() returned None; unable to capture video frame."
                             if render_error is not None:
                                 msg += f" Last error: {render_error}"
-                            msg += " Ensure MuJoCo is configured with an offscreen renderer (e.g. MUJOCO_GL=egl)."
+                            msg += f" Active MUJOCO_GL={os.environ.get('MUJOCO_GL')}"
+                            msg += ". Ensure the backend is installed (see MUJOCO_LOG.TXT for details)."
                             print(msg)
                             capture_warning_shown = True
                     else:
@@ -269,7 +319,11 @@ def main(total_timesteps: int = 10000, env_id: str = None, render: bool = False,
             if frames_written > 0:
                 print(f"Saved rollout video to {save_video}")
             else:
-                print("Warning: no video frames were captured; verify MuJoCo offscreen rendering (MUJOCO_GL=egl).")
+                active_backend = os.environ.get("MUJOCO_GL")
+                print(
+                    "Warning: no video frames were captured with MUJOCO_GL="
+                    f"{active_backend}. Inspect MUJOCO_LOG.TXT and ensure the backend is available."
+                )
 
         # Close evaluation and training envs
         try:
@@ -291,5 +345,16 @@ if __name__ == '__main__':
     p.add_argument('--render', action='store_true')
     p.add_argument('--save-video', type=str, default=None,
                    help='Path to save evaluation rollout mp4 (e.g. outputs/rollout.mp4)')
+    p.add_argument('--mujoco-gl', type=str, default='auto', choices=['auto', 'egl', 'osmesa', 'glfw'],
+                   help='OpenGL backend for MuJoCo (auto picks egl without DISPLAY, otherwise glfw).')
+    p.add_argument('--force-mujoco-gl', action='store_true',
+                   help='If set, do not fallback to another backend when MuJoCo creation fails.')
     args = p.parse_args()
-    main(total_timesteps=args.timesteps, env_id=args.env, render=args.render, save_video=args.save_video)
+    main(
+        total_timesteps=args.timesteps,
+        env_id=args.env,
+        render=args.render,
+        save_video=args.save_video,
+        mujoco_gl=args.mujoco_gl,
+        force_mujoco_gl=args.force_mujoco_gl,
+    )

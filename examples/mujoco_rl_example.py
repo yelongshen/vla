@@ -10,7 +10,6 @@ import os
 import argparse
 import numpy as np
 
-
 def configure_mujoco_gl(requested_backend: str, force_backend: bool) -> str:
     """Configure MuJoCo's OpenGL backend before environments are created."""
     original_backend = os.environ.get("MUJOCO_GL")

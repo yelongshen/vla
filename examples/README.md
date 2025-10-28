@@ -1,10 +1,14 @@
-MuJoCo RL Example
-=================
+Examples
+========
 
-This folder contains `mujoco_rl_example.py`, an example script that trains a PPO agent using
-Stable-Baselines3. The script will attempt to use a MuJoCo environment (e.g. HalfCheetah-v4).
-If MuJoCo is not available on your system, the script will fall back to `CartPole-v1` so you
-can verify the training loop without MuJoCo binaries.
+This folder collects runnable demos for different simulators supported by the project.
+
+MuJoCo RL Example (`mujoco_rl_example.py`)
+-----------------------------------------
+
+Trains a PPO or SAC agent using Stable-Baselines3. The script attempts to use a MuJoCo
+environment (e.g. `HalfCheetah-v4`). If MuJoCo is not available on your system, the script falls
+back to `CartPole-v1` so you can verify the training loop without MuJoCo binaries.
 
 Running the example
 -------------------
@@ -39,3 +43,24 @@ Notes
 ```bash
 pip install shimmy
 ```
+
+
+Omniverse Minimal Demo (`omniverse_minimal_demo.py`)
+---------------------------------------------------
+
+Bootstraps an Omniverse Isaac Sim session, drops a cube onto a ground plane, and runs the
+simulation loop for a few seconds. This script must be executed with Isaac Sim's Python
+interpreter because the Omniverse Kit libraries are not available in a stock Python install.
+
+Quick start (inside an Omniverse Isaac Sim installation directory):
+
+```bash
+./python.sh examples/omniverse_minimal_demo.py           # with GUI
+./python.sh examples/omniverse_minimal_demo.py --headless --steps 600
+```
+
+Troubleshooting tips:
+
+- Ensure the `examples/` folder is accessible from the current Omniverse working directory.
+- Pass `--headless` when running on a remote server without X11/Wayland.
+- The script prints cube poses every 60 steps; increase `--steps` to watch longer simulations.

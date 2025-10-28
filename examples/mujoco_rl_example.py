@@ -1,10 +1,11 @@
-"""MuJoCo RL example with PPO (falls back to CartPole if MuJoCo not available).
+"""MuJoCo RL example with PPO or SAC (falls back to CartPole if MuJoCo not available).
 
 This script trains a PPO agent using Stable-Baselines3. If MuJoCo envs are not available
 on the host, it falls back to CartPole-v1 so you can test the training loop.
 
 Usage:
-  python examples/mujoco_rl_example.py --timesteps 50000
+    python examples/mujoco_rl_example.py --timesteps 50000 --algo ppo
+    python examples/mujoco_rl_example.py --timesteps 50000 --algo sac --policy transformer
 """
 import os
 import argparse
@@ -164,11 +165,43 @@ def resolve_episode_video_path(base_path: str, episode_index: int) -> Path:
     return directory / f"{stem}_ep{episode_index + 1:04d}{suffix}"
 
 
+def resolve_evaluation_video_base(base_path: str, timestep: int) -> str:
+    """Return a video base path that encodes the training timestep."""
+    expanded = os.path.expanduser(base_path)
+    original = Path(expanded)
+
+    step_fragment = f"step{timestep:07d}"
+
+    if base_path.endswith(os.sep):
+        directory = original
+        filename = f"rollout_{step_fragment}.mp4"
+        return str(directory / filename)
+
+    suffix = original.suffix
+    if suffix:
+        directory = original.parent if original.parent != Path("") else Path(".")
+        stem = original.stem
+        return str(directory / f"{stem}_{step_fragment}{suffix}")
+
+    directory = original.parent if original.parent != Path("") else Path(".")
+    stem = original.name or "rollout"
+    return str(directory / f"{stem}_{step_fragment}.mp4")
+
+
 def main(
     total_timesteps: int = 10000,
     env_id: str = None,
     render: bool = False,
     save_video: str = None,
+    eval_interval: int = 10000,
+    load_checkpoint: str = None,
+    policy_type: str = "mlp",
+    transformer_seq_len: int = 8,
+    transformer_d_model: int = 128,
+    transformer_nhead: int = 4,
+    transformer_layers: int = 2,
+    transformer_dropout: float = 0.1,
+    algo: str = "ppo",
     mujoco_gl: str = "auto",
     force_mujoco_gl: bool = False,
 ):
@@ -195,6 +228,171 @@ def main(
                 "or see the migration guide: https://gymnasium.farama.org/introduction/migration_guide/"
             ) from e
 
+    algo_choice = (algo or "ppo").strip().lower()
+    if algo_choice not in {"ppo", "sac"}:
+        raise ValueError(f"Unsupported algo '{algo}'. Choose from ['ppo', 'sac'].")
+
+    policy_choice = (policy_type or "mlp").strip().lower()
+    if policy_choice not in {"mlp", "transformer"}:
+        raise ValueError(f"Unsupported policy_type '{policy_type}'. Choose from ['mlp', 'transformer'].")
+
+    use_transformer = policy_choice == "transformer"
+    HistoryEnvWrapper = None
+    TransformerFeatureExtractor = None
+    policy_kwargs = {}
+    policy_class = "MlpPolicy"
+
+    if use_transformer:
+        if transformer_seq_len <= 0:
+            raise ValueError("transformer_seq_len must be positive when using transformer policy.")
+        try:
+            import torch
+            import torch.nn as nn
+        except ImportError as exc:
+            raise RuntimeError(
+                "Transformer policy requires PyTorch. Install it with `pip install torch`."
+            ) from exc
+
+        from stable_baselines3.common.policies import ActorCriticPolicy
+        from stable_baselines3.common.torch_layers import BaseFeaturesExtractor
+
+        class HistoryEnvWrapper(gym.Wrapper):
+            def __init__(self, env, seq_len: int):
+                super().__init__(env)
+                self.seq_len = int(seq_len)
+                if self.seq_len <= 0:
+                    raise ValueError("seq_len must be positive for HistoryEnvWrapper")
+                if not isinstance(env.observation_space, gym.spaces.Box):
+                    raise TypeError(
+                        "Transformer policy currently supports environments with Box observation spaces only."
+                    )
+                self._obs_space = env.observation_space
+                self._obs_dim = int(np.prod(self._obs_space.shape))
+                self._action_space = env.action_space
+                self._action_dim = self._infer_action_dim()
+                self._combined_dim = self._obs_dim + self._action_dim
+                low = np.full((self.seq_len * self._combined_dim,), -np.inf, dtype=np.float32)
+                high = np.full_like(low, np.inf)
+                self.observation_space = gym.spaces.Box(low=low, high=high, dtype=np.float32)
+                self.action_space = env.action_space
+                self._obs_hist = np.zeros((self.seq_len, self._obs_dim), dtype=np.float32)
+                self._act_hist = np.zeros((self.seq_len, self._action_dim), dtype=np.float32)
+
+            def _infer_action_dim(self) -> int:
+                sample = self._action_space.sample()
+                flat = self._flatten_action(sample)
+                return int(flat.shape[0])
+
+            def _flatten_obs(self, obs) -> np.ndarray:
+                return np.asarray(obs, dtype=np.float32).reshape(-1)
+
+            def _flatten_action(self, action) -> np.ndarray:
+                space = self._action_space
+                if isinstance(space, gym.spaces.Box):
+                    return np.asarray(action, dtype=np.float32).reshape(-1)
+                if isinstance(space, gym.spaces.Discrete):
+                    vec = np.zeros(space.n, dtype=np.float32)
+                    vec[int(action)] = 1.0
+                    return vec
+                if isinstance(space, (gym.spaces.MultiBinary, gym.spaces.MultiDiscrete)):
+                    return np.asarray(action, dtype=np.float32).reshape(-1)
+                raise TypeError(
+                    f"Unsupported action space for HistoryEnvWrapper: {space}"
+                )
+
+            def _reset_buffers(self, obs) -> None:
+                self._obs_hist.fill(0.0)
+                self._act_hist.fill(0.0)
+                self._obs_hist[-1] = self._flatten_obs(obs)
+
+            def _push(self, obs, action_vec) -> None:
+                self._obs_hist = np.roll(self._obs_hist, shift=-1, axis=0)
+                self._act_hist = np.roll(self._act_hist, shift=-1, axis=0)
+                self._obs_hist[-1] = self._flatten_obs(obs)
+                self._act_hist[-1] = action_vec.astype(np.float32)
+
+            def _current_observation(self) -> np.ndarray:
+                stacked = np.concatenate((self._obs_hist, self._act_hist), axis=1)
+                return stacked.reshape(-1).astype(np.float32)
+
+            def reset(self, **kwargs):  # type: ignore[override]
+                result = self.env.reset(**kwargs)
+                if isinstance(result, tuple) and len(result) == 2:
+                    obs, info = result
+                    self._reset_buffers(obs)
+                    return self._current_observation(), info
+                obs = result
+                self._reset_buffers(obs)
+                return self._current_observation()
+
+            def step(self, action):  # type: ignore[override]
+                action_vec = self._flatten_action(action)
+                result = self.env.step(action)
+                if len(result) == 4:
+                    obs, reward, done, info = result
+                    self._push(obs, action_vec)
+                    return self._current_observation(), reward, done, info
+                if len(result) == 5:
+                    obs, reward, terminated, truncated, info = result
+                    self._push(obs, action_vec)
+                    return self._current_observation(), reward, terminated, truncated, info
+                raise RuntimeError("Unexpected number of return values from env.step")
+
+        class TransformerFeatureExtractor(BaseFeaturesExtractor):
+            def __init__(
+                self,
+                observation_space,
+                seq_len: int,
+                d_model: int,
+                nhead: int,
+                num_layers: int,
+                dropout: float,
+            ):
+                super().__init__(observation_space, features_dim=d_model)
+                total_dim = int(np.prod(observation_space.shape))
+                if total_dim % seq_len != 0:
+                    raise ValueError(
+                        f"Observation dimension {total_dim} is not divisible by seq_len {seq_len}."
+                    )
+                self.seq_len = seq_len
+                self.step_dim = total_dim // seq_len
+                self.input_projection = nn.Linear(self.step_dim, d_model)
+                encoder_layer = nn.TransformerEncoderLayer(
+                    d_model=d_model,
+                    nhead=nhead,
+                    dim_feedforward=max(4 * d_model, d_model),
+                    dropout=dropout,
+                    batch_first=True,
+                    activation="gelu",
+                )
+                self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
+                self.positional_embedding = nn.Parameter(torch.zeros(1, seq_len, d_model))
+                nn.init.normal_(self.positional_embedding, mean=0.0, std=0.02)
+                self.layer_norm = nn.LayerNorm(d_model)
+
+            def forward(self, observations):
+                batch_size = observations.shape[0]
+                seq = observations.view(batch_size, self.seq_len, self.step_dim)
+                x = self.input_projection(seq)
+                x = x + self.positional_embedding[:, : self.seq_len, :]
+                x = self.transformer(x)
+                x = self.layer_norm(x[:, -1, :])
+                return x
+
+        policy_kwargs = {
+            "features_extractor_class": TransformerFeatureExtractor,
+            "features_extractor_kwargs": {
+                "seq_len": transformer_seq_len,
+                "d_model": transformer_d_model,
+                "nhead": transformer_nhead,
+                "num_layers": transformer_layers,
+                "dropout": transformer_dropout,
+            },
+        }
+
+    print(f"Selected algorithm: {algo_choice}")
+    print(f"Selected policy type: {policy_choice}")
+
     # try to select a MuJoCo env
     mujo_env_candidates = [
         "HalfCheetah-v5",
@@ -203,8 +401,8 @@ def main(
         "Walker2d-v4",
         "Ant-v5",
         "Ant-v4",
-        "Humanoid-v5",
         "Humanoid-v4",
+        "Humanoid-v5",
     ]
 
     def select_mujoco_env(candidate_env_id: str):
@@ -214,6 +412,8 @@ def main(
             for cand in mujo_env_candidates:
                 try:
                     env_obj = gym.make(cand)
+                    if use_transformer:
+                        env_obj = HistoryEnvWrapper(env_obj, transformer_seq_len)
                     chosen_env = cand
                     print(f"Using MuJoCo environment: {cand}")
                     break
@@ -223,6 +423,8 @@ def main(
         else:
             try:
                 env_obj = gym.make(candidate_env_id)
+                if use_transformer:
+                    env_obj = HistoryEnvWrapper(env_obj, transformer_seq_len)
                 chosen_env = candidate_env_id
             except Exception as exc:
                 print(f"Failed to create environment '{candidate_env_id}': {exc}")
@@ -248,10 +450,12 @@ def main(
         print("MuJoCo environments not available. Falling back to CartPole-v1 for demo.")
         selected_env = "CartPole-v1"
         env = gym.make(selected_env)
+        if use_transformer:
+            env = HistoryEnvWrapper(env, transformer_seq_len)
 
     # Stable Baselines3
     try:
-        from stable_baselines3 import PPO
+        from stable_baselines3 import PPO, SAC
         from stable_baselines3.common.env_util import make_vec_env
     except ModuleNotFoundError as e:
         # If shimmy or another dependency is missing, give a clear instruction
@@ -268,8 +472,14 @@ def main(
         ) from e
 
     # vectorized env for training
+    def _make_training_env():
+        base_env = gym.make(selected_env)
+        if use_transformer:
+            base_env = HistoryEnvWrapper(base_env, transformer_seq_len)
+        return base_env
+
     try:
-        vec_env = make_vec_env(lambda: gym.make(selected_env), n_envs=1)
+        vec_env = make_vec_env(_make_training_env, n_envs=1)
     except ModuleNotFoundError as e:
         missing = getattr(e, 'name', None) or str(e)
         raise RuntimeError(
@@ -301,27 +511,54 @@ def main(
     print("action_space sample:", vec_env.action_space.sample())
     print("action_space shape:", getattr(vec_env.action_space, "shape", None))
     # If continuous:
-    action_dim = vec_env.action_space.shape[0] if vec_env.action_space.shape else None
+    action_dim = vec_env.action_space.shape[0] if getattr(vec_env.action_space, "shape", None) else None
     print("action_dim:", action_dim)
+
+    if algo_choice == "sac" and not isinstance(vec_env.action_space, gym.spaces.Box):
+        raise TypeError(
+            "SAC requires a continuous (Box) action space. Choose a MuJoCo task with continuous actions."
+        )
+
+    algo_cls = PPO if algo_choice == "ppo" else SAC
+    algo_label = algo_choice.upper()
 
     model_dir = os.path.join("outputs", "mujoco")
     os.makedirs(model_dir, exist_ok=True)
-    model_path = os.path.join(model_dir, f"ppo_{selected_env.replace('/', '_')}.zip")
+    model_path = os.path.join(model_dir, f"{algo_choice}_{selected_env.replace('/', '_')}.zip")
 
-    print(f"Training PPO on {selected_env} for {total_timesteps} timesteps")
-    model = PPO("MlpPolicy", vec_env, verbose=1)
-    model.learn(total_timesteps=total_timesteps)
-    model.save(model_path)
-    print(f"Saved model to {model_path}")
+    checkpoint_path = None
+    if load_checkpoint:
+        checkpoint_path = os.path.expanduser(load_checkpoint)
+        if not os.path.isfile(checkpoint_path):
+            raise FileNotFoundError(f"Checkpoint file not found: {checkpoint_path}")
+        print(f"Loading {algo_label} checkpoint from {checkpoint_path}")
+        model = algo_cls.load(checkpoint_path, env=vec_env)
+        model.set_env(vec_env)
+        print(f"Loaded model with num_timesteps={getattr(model, 'num_timesteps', 'unknown')}")
+    else:
+        model = algo_cls(policy_class, vec_env, verbose=1, policy_kwargs=policy_kwargs)
+
+    initial_model_timesteps = int(getattr(model, "num_timesteps", 0) or 0)
+    print(
+        f"Training {algo_label} on {selected_env} for {total_timesteps} additional timesteps"
+        + (f" (starting from {initial_model_timesteps})" if initial_model_timesteps else "")
+    )
+
+    if eval_interval <= 0:
+        raise ValueError("eval_interval must be a positive integer")
 
     # evaluation
     backend = "osmesa"
     os.environ["MUJOCO_GL"] = backend
     #os.environ["PYOPENGL_PLATFORM"] = backend
 
-    eval_episodes = 5
+    eval_episodes = 1
+    current_eval_backend = backend
+    all_saved_video_paths = []
+    last_render_error_global = None
+    evaluation_history = []
 
-    def evaluate_policy_with_backend(eval_backend: str):
+    def evaluate_policy_with_backend(eval_backend: str, video_path_base: str = None):
         nonlocal env
 
         rewards_local = []
@@ -339,7 +576,7 @@ def main(
             print(f"Evaluating policy with MUJOCO_GL={eval_backend}")
 
         try:
-            if save_video:
+            if video_path_base:
                 try:
                     import imageio
                     imageio_module = imageio
@@ -361,6 +598,8 @@ def main(
                         f"{os.environ.get('MUJOCO_GL')}: {exc}"
                     )
                     return [], 0, last_render_error_local, []
+                if use_transformer:
+                    eval_env_local = HistoryEnvWrapper(eval_env_local, transformer_seq_len)
                 rollout_env_local = eval_env_local
             else:
                 rollout_env_local = env
@@ -416,10 +655,10 @@ def main(
                             except Exception:
                                 pass
 
-                        if save_video and imageio_module is not None:
+                        if video_path_base and imageio_module is not None:
                             if writer_episode is None:
                                 try:
-                                    episode_video_path = resolve_episode_video_path(save_video, ep)
+                                    episode_video_path = resolve_episode_video_path(video_path_base, ep)
                                 except Exception as exc:
                                     raise RuntimeError(
                                         f"Failed to prepare video path for episode {ep + 1}: {exc}"
@@ -499,7 +738,7 @@ def main(
                         except Exception:
                             pass
 
-                    if save_video and episode_video_path is not None:
+                    if video_path_base and episode_video_path is not None:
                         if frames_written_episode > 0:
                             frames_written_local += frames_written_episode
                             saved_video_paths_local.append(str(episode_video_path))
@@ -523,7 +762,7 @@ def main(
             return rewards_local, frames_written_local, last_render_error_local, saved_video_paths_local
 
         finally:
-            if save_video and frames_written_local == 0:
+            if video_path_base and frames_written_local == 0:
                 print(
                     "Warning: no video frames were captured with MUJOCO_GL="
                     f"{eval_backend}. Inspect MUJOCO_LOG.TXT and ensure the backend is available."
@@ -540,41 +779,110 @@ def main(
             else:
                 os.environ.pop("MUJOCO_GL", None)
 
-    print('evaluation backend', backend)
-    saved_video_paths = []
-    rewards, frames_written, last_render_error, saved_video_paths = evaluate_policy_with_backend(backend)
+    def run_evaluation(video_path_base: str, trained_steps: int):
+        nonlocal backend, current_eval_backend, last_render_error_global, all_saved_video_paths
 
-    if save_video and frames_written == 0 and backend == "egl" and not force_mujoco_gl:
-        print("Retrying evaluation rollout with MUJOCO_GL=osmesa after EGL failure.")
-        try:
-            for candidate in saved_video_paths:
-                if os.path.exists(candidate):
-                    os.remove(candidate)
-        except OSError:
-            pass
-        backend = "osmesa"
-        rewards, frames_written, last_render_error, saved_video_paths = evaluate_policy_with_backend("osmesa")
-        if backend:
-            os.environ["MUJOCO_GL"] = backend
-
-    if save_video and frames_written == 0 and last_render_error is not None:
-        raise RuntimeError(
-            "Unable to capture video frames because both EGL and OSMesa renderers failed.\n"
-            f"MuJoCo reported: {last_render_error}\n"
-            "Install headless rendering support (e.g. mesa-libOSMesa-dev / libosmesa6) or run with a working EGL GPU setup."
+        rewards_local, frames_written_local, last_render_error_local, saved_paths_local = (
+            evaluate_policy_with_backend(current_eval_backend, video_path_base)
         )
 
-    if save_video and frames_written == 0 and force_mujoco_gl and last_render_error is not None:
-        raise RuntimeError(
-            "MuJoCo rendering failed even though --force-mujoco-gl was set.\n"
-            f"Last error: {last_render_error}\n"
-            "Inspect MUJOCO_LOG.TXT for backend diagnostics."
+        if (
+            video_path_base
+            and frames_written_local == 0
+            and current_eval_backend == "egl"
+            and not force_mujoco_gl
+        ):
+            print("Retrying evaluation rollout with MUJOCO_GL=osmesa after EGL failure.")
+            try:
+                for candidate in saved_paths_local:
+                    if os.path.exists(candidate):
+                        os.remove(candidate)
+            except OSError:
+                pass
+            current_eval_backend = "osmesa"
+            backend = current_eval_backend
+            rewards_local, frames_written_local, last_render_error_local, saved_paths_local = (
+                evaluate_policy_with_backend(current_eval_backend, video_path_base)
+            )
+            if current_eval_backend:
+                os.environ["MUJOCO_GL"] = current_eval_backend
+
+        if video_path_base and frames_written_local == 0 and last_render_error_local is not None:
+            if force_mujoco_gl:
+                raise RuntimeError(
+                    "MuJoCo rendering failed even though --force-mujoco-gl was set.\n"
+                    f"Last error: {last_render_error_local}\n"
+                    "Inspect MUJOCO_LOG.TXT for backend diagnostics."
+                )
+            raise RuntimeError(
+                "Unable to capture video frames because both EGL and OSMesa renderers failed.\n"
+                f"MuJoCo reported: {last_render_error_local}\n"
+                "Install headless rendering support (e.g. mesa-libOSMesa-dev / libosmesa6) or run with a working EGL GPU setup."
+            )
+
+        if saved_paths_local:
+            all_saved_video_paths.extend(saved_paths_local)
+
+        last_render_error_global = last_render_error_local
+
+        evaluation_history.append(
+            {
+                "steps": trained_steps,
+                "episodes": len(rewards_local),
+                "mean_reward": float(np.mean(rewards_local)) if rewards_local else None,
+                "std_reward": float(np.std(rewards_local)) if len(rewards_local) > 1 else 0.0,
+            }
         )
 
-    if save_video and saved_video_paths:
+        return rewards_local, frames_written_local
+
+
+    timesteps_trained = 0
+    iteration = 0
+    while timesteps_trained < total_timesteps:
+        iteration += 1
+        chunk = min(eval_interval, total_timesteps - timesteps_trained)
+        target_total = initial_model_timesteps + total_timesteps
+        upcoming_total = initial_model_timesteps + timesteps_trained + chunk
+        print(
+            f"Training iteration {iteration}: {chunk} timesteps (target {upcoming_total}/{target_total})"
+        )
+        model.learn(
+            total_timesteps=chunk,
+            reset_num_timesteps=(timesteps_trained == 0 and checkpoint_path is None),
+        )
+        timesteps_trained += chunk
+
+        global_timesteps = initial_model_timesteps + timesteps_trained
+
+        if save_video:
+            video_base_for_eval = resolve_evaluation_video_base(save_video, global_timesteps)
+        else:
+            video_base_for_eval = None
+
+        run_evaluation(video_base_for_eval, global_timesteps)
+
+    model.save(model_path)
+    print(f"Saved model to {model_path}")
+
+    if save_video and all_saved_video_paths:
         print("Saved evaluation videos:")
-        for path in saved_video_paths:
+        for path in all_saved_video_paths:
             print(f"  {path}")
+
+    if evaluation_history:
+        print("Evaluation checkpoints:")
+        for entry in evaluation_history:
+            steps = entry["steps"]
+            mean_reward = entry["mean_reward"]
+            std_reward = entry["std_reward"]
+            episodes = entry["episodes"]
+            if mean_reward is not None:
+                print(
+                    f"  steps={steps}: mean_reward={mean_reward:.2f} (std {std_reward:.2f}) over {episodes} episodes"
+                )
+            else:
+                print(f"  steps={steps}: no rewards recorded over {episodes} episodes")
 
     # Close evaluation and training envs
     try:
@@ -586,10 +894,28 @@ def main(
 if __name__ == '__main__':
     p = argparse.ArgumentParser()
     p.add_argument('--timesteps', type=int, default=10000)
+    p.add_argument('--algo', type=str, default='ppo', choices=['ppo', 'sac'],
+                   help='RL algorithm to train (ppo = on-policy, sac = off-policy).')
+    p.add_argument('--eval-interval', type=int, default=10000,
+                   help='Number of training timesteps between evaluation rollouts and video capture.')
     p.add_argument('--env', type=str, default=None)
     p.add_argument('--render', action='store_true')
     p.add_argument('--save-video', type=str, default=None,
                    help='Path to save evaluation rollout mp4 (e.g. outputs/rollout.mp4)')
+    p.add_argument('--policy', type=str, default='mlp', choices=['mlp', 'transformer'],
+                   help='Policy architecture to use for PPO training.')
+    p.add_argument('--transformer-seq-len', type=int, default=8,
+                   help='Sequence length (number of past steps) for transformer policy inputs.')
+    p.add_argument('--transformer-d-model', type=int, default=128,
+                   help='Transformer model dimension for the custom policy.')
+    p.add_argument('--transformer-nhead', type=int, default=4,
+                   help='Number of attention heads in the transformer policy.')
+    p.add_argument('--transformer-layers', type=int, default=2,
+                   help='Number of transformer encoder layers in the policy.')
+    p.add_argument('--transformer-dropout', type=float, default=0.1,
+                   help='Dropout rate applied inside the transformer encoder.')
+    p.add_argument('--load-checkpoint', type=str, default=None,
+                   help='Path to an existing PPO checkpoint to resume training from.')
     p.add_argument('--mujoco-gl', type=str, default='auto', choices=['auto', 'egl', 'osmesa', 'glfw'],
                    help='OpenGL backend for MuJoCo (auto picks egl without DISPLAY, otherwise glfw).')
     p.add_argument('--force-mujoco-gl', action='store_true',
@@ -600,6 +926,15 @@ if __name__ == '__main__':
         env_id=args.env,
         render=args.render,
         save_video=args.save_video,
+        eval_interval=args.eval_interval,
+        load_checkpoint=args.load_checkpoint,
+        policy_type=args.policy,
+        algo=args.algo,
+        transformer_seq_len=args.transformer_seq_len,
+        transformer_d_model=args.transformer_d_model,
+        transformer_nhead=args.transformer_nhead,
+        transformer_layers=args.transformer_layers,
+        transformer_dropout=args.transformer_dropout,
         mujoco_gl=args.mujoco_gl,
         force_mujoco_gl=args.force_mujoco_gl,
     )
